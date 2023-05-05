@@ -282,6 +282,7 @@ pub struct Plot {
     view_aspect: Option<f32>,
 
     reset: bool,
+    unreset: bool,
 
     show_x: bool,
     show_y: bool,
@@ -321,6 +322,7 @@ impl Plot {
             view_aspect: None,
 
             reset: false,
+            unreset: false,
 
             show_x: true,
             show_y: true,
@@ -623,6 +625,12 @@ impl Plot {
         self
     }
 
+    /// Unresets the plot to allow the bounds to be unlocked.
+    pub fn unreset(mut self) -> Self {
+        self.unreset = true;
+        self
+    }
+
     /// Interact with and add items to the plot and finally draw it.
     pub fn show<R>(self, ui: &mut Ui, build_fn: impl FnOnce(&mut PlotUi) -> R) -> InnerResponse<R> {
         self.show_dyn(ui, Box::new(build_fn))
@@ -658,6 +666,7 @@ impl Plot {
             axis_formatters,
             legend_config,
             reset,
+            unreset,
             show_background,
             show_axes,
             linked_axes,
@@ -798,6 +807,10 @@ impl Plot {
         } else {
             Vec::new()
         };
+
+        if unreset {
+            bounds_modified = true.into();
+        }
 
         // Transfer the bounds from a link group.
         if let Some(axes) = linked_axes.as_ref() {
