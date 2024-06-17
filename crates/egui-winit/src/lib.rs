@@ -31,7 +31,7 @@ pub(crate) use profiling_scopes::*;
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::ElementState,
-    event_loop::EventLoopWindowTarget,
+    event_loop::ActiveEventLoop,
     window::{CursorGrabMode, Window, WindowButtons, WindowLevel},
 };
 
@@ -158,16 +158,15 @@ impl State {
     }
 
     #[cfg(feature = "accesskit")]
-    pub fn init_accesskit<T: From<accesskit_winit::ActionRequestEvent> + Send>(
+    pub fn init_accesskit<T: From<accesskit_winit::Event> + Send + 'static>(
         &mut self,
         window: &Window,
         event_loop_proxy: winit::event_loop::EventLoopProxy<T>,
         initial_tree_update_factory: impl 'static + FnOnce() -> accesskit::TreeUpdate + Send,
     ) {
         crate::profile_function!();
-        self.accesskit = Some(accesskit_winit::Adapter::new(
+        self.accesskit = Some(accesskit_winit::Adapter::with_event_loop_proxy(
             window,
-            initial_tree_update_factory,
             event_loop_proxy,
         ));
     }
@@ -263,7 +262,7 @@ impl State {
         crate::profile_function!(short_window_event_description(event));
 
         #[cfg(feature = "accesskit")]
-        if let Some(accesskit) = &self.accesskit {
+        if let Some(accesskit) = self.accesskit.as_mut() {
             accesskit.process_event(window, event);
         }
 
@@ -466,7 +465,9 @@ impl State {
             | WindowEvent::Moved(_)
             | WindowEvent::ThemeChanged(_)
             | WindowEvent::TouchpadPressure { .. }
-            | WindowEvent::CloseRequested => EventResponse {
+            | WindowEvent::CloseRequested
+            | WindowEvent::PanGesture { .. }
+            | WindowEvent::DoubleTapGesture { .. } => EventResponse {
                 repaint: true,
                 consumed: false,
             },
@@ -474,13 +475,12 @@ impl State {
             // Things we completely ignore:
             WindowEvent::ActivationTokenDone { .. }
             | WindowEvent::AxisMotion { .. }
-            | WindowEvent::SmartMagnify { .. }
-            | WindowEvent::TouchpadRotate { .. } => EventResponse {
+            | WindowEvent::RotationGesture { .. } => EventResponse {
                 repaint: false,
                 consumed: false,
             },
 
-            WindowEvent::TouchpadMagnify { delta, .. } => {
+            WindowEvent::PinchGesture { delta, .. } => {
                 // Positive delta values indicate magnification (zooming in).
                 // Negative delta values indicate shrinking (zooming out).
                 let zoom_factor = (*delta as f32).exp();
@@ -856,14 +856,6 @@ impl State {
             }
         } else {
             self.ime_rect_px = None;
-        }
-
-        #[cfg(feature = "accesskit")]
-        if let Some(accesskit) = self.accesskit.as_ref() {
-            if let Some(update) = accesskit_update {
-                crate::profile_scope!("accesskit");
-                accesskit.update_if_active(|| update);
-            }
         }
     }
 
@@ -1522,9 +1514,9 @@ fn process_viewport_command(
 ///
 /// # Errors
 /// Possible causes of error include denied permission, incompatible system, and lack of memory.
-pub fn create_window<T>(
+pub fn create_window(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &ActiveEventLoop,
     viewport_builder: &ViewportBuilder,
 ) -> Result<Window, winit::error::OsError> {
     crate::profile_function!();
@@ -1533,17 +1525,17 @@ pub fn create_window<T>(
         create_winit_window_builder(egui_ctx, event_loop, viewport_builder.clone());
     let window = {
         crate::profile_scope!("WindowBuilder::build");
-        window_builder.build(event_loop)?
+        event_loop.create_window(window_builder)?
     };
     apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder);
     Ok(window)
 }
 
-pub fn create_winit_window_builder<T>(
+pub fn create_winit_window_builder(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &ActiveEventLoop,
     viewport_builder: ViewportBuilder,
-) -> winit::window::WindowBuilder {
+) -> winit::window::WindowAttributes {
     crate::profile_function!();
 
     // We set sizes and positions in egui:s own ui points, which depends on the egui
@@ -1602,7 +1594,7 @@ pub fn create_winit_window_builder<T>(
         clamp_size_to_monitor_size: _, // Handled in `viewport_builder` in `epi_integration.rs`
     } = viewport_builder;
 
-    let mut window_builder = winit::window::WindowBuilder::new()
+    let mut window_builder = winit::window::WindowAttributes::default()
         .with_title(title.unwrap_or_else(|| "egui window".to_owned()))
         .with_transparent(transparent.unwrap_or(false))
         .with_decorations(decorations.unwrap_or(true))
@@ -1697,7 +1689,7 @@ pub fn create_winit_window_builder<T>(
 
     #[cfg(target_os = "windows")]
     {
-        use winit::platform::windows::WindowBuilderExtWindows as _;
+        use winit::platform::windows::WindowAttributesExtWindows;
         if let Some(enable) = _drag_and_drop {
             window_builder = window_builder.with_drag_and_drop(enable);
         }
@@ -1840,16 +1832,17 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::CursorLeft { .. } => "WindowEvent::CursorLeft",
         WindowEvent::MouseWheel { .. } => "WindowEvent::MouseWheel",
         WindowEvent::MouseInput { .. } => "WindowEvent::MouseInput",
-        WindowEvent::TouchpadMagnify { .. } => "WindowEvent::TouchpadMagnify",
+        WindowEvent::PinchGesture { .. } => "WindowEvent::PinchGesture",
         WindowEvent::RedrawRequested { .. } => "WindowEvent::RedrawRequested",
-        WindowEvent::SmartMagnify { .. } => "WindowEvent::SmartMagnify",
-        WindowEvent::TouchpadRotate { .. } => "WindowEvent::TouchpadRotate",
+        WindowEvent::PanGesture { .. } => "WindowEvent::PanGesture",
+        WindowEvent::RotationGesture { .. } => "WindowEvent::RotationGesture",
         WindowEvent::TouchpadPressure { .. } => "WindowEvent::TouchpadPressure",
         WindowEvent::AxisMotion { .. } => "WindowEvent::AxisMotion",
         WindowEvent::Touch { .. } => "WindowEvent::Touch",
         WindowEvent::ScaleFactorChanged { .. } => "WindowEvent::ScaleFactorChanged",
         WindowEvent::ThemeChanged { .. } => "WindowEvent::ThemeChanged",
         WindowEvent::Occluded { .. } => "WindowEvent::Occluded",
+        WindowEvent::DoubleTapGesture { .. } => "WindowEvent::DoubleTapGesture",
     }
 }
 
