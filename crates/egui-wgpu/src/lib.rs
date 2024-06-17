@@ -24,6 +24,7 @@ pub use wgpu;
 mod renderer;
 
 pub use renderer::*;
+use wgpu::TextureFormat;
 
 /// Module for painting [`egui`](https://github.com/emilk/egui) with [`wgpu`] on [`winit`].
 #[cfg(feature = "winit")]
@@ -59,13 +60,6 @@ pub struct RenderState {
     /// Wgpu adapter used for rendering.
     pub adapter: Arc<wgpu::Adapter>,
 
-    /// All the available adapters.
-    ///
-    /// This is not available on web.
-    /// On web, we always select WebGPU is available, then fall back to WebGL if not.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub available_adapters: Arc<[wgpu::Adapter]>,
-
     /// Wgpu device used for rendering, created from the adapter.
     pub device: Arc<wgpu::Device>,
 
@@ -85,114 +79,24 @@ impl RenderState {
     /// # Errors
     /// Wgpu initialization may fail due to incompatible hardware or driver for a given config.
     pub async fn create(
-        config: &WgpuConfiguration,
-        instance: &wgpu::Instance,
-        surface: &wgpu::Surface<'static>,
+        adapter: Arc<wgpu::Adapter>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        target_format: TextureFormat,
         depth_format: Option<wgpu::TextureFormat>,
         msaa_samples: u32,
     ) -> Result<Self, WgpuError> {
         crate::profile_scope!("RenderState::create"); // async yield give bad names using `profile_function`
 
-        // This is always an empty list on web.
-        #[cfg(not(target_arch = "wasm32"))]
-        let available_adapters = instance.enumerate_adapters(wgpu::Backends::all());
-
-        let adapter = {
-            crate::profile_scope!("request_adapter");
-            instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: config.power_preference,
-                    compatible_surface: Some(surface),
-                    force_fallback_adapter: false,
-                })
-                .await
-                .ok_or_else(|| {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if available_adapters.is_empty() {
-                        log::info!("No wgpu adapters found");
-                    } else if available_adapters.len() == 1 {
-                        log::info!(
-                            "The only available wgpu adapter was not suitable: {}",
-                            adapter_info_summary(&available_adapters[0].get_info())
-                        );
-                    } else {
-                        log::info!(
-                            "No suitable wgpu adapter found out of the {} available ones: {}",
-                            available_adapters.len(),
-                            describe_adapters(&available_adapters)
-                        );
-                    }
-
-                    WgpuError::NoSuitableAdapterFound
-                })?
-        };
-
-        #[cfg(target_arch = "wasm32")]
-        log::debug!(
-            "Picked wgpu adapter: {}",
-            adapter_info_summary(&adapter.get_info())
-        );
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if available_adapters.len() == 1 {
-            log::debug!(
-                "Picked the only available wgpu adapter: {}",
-                adapter_info_summary(&adapter.get_info())
-            );
-        } else {
-            log::info!(
-                "There were {} available wgpu adapters: {}",
-                available_adapters.len(),
-                describe_adapters(&available_adapters)
-            );
-            log::debug!(
-                "Picked wgpu adapter: {}",
-                adapter_info_summary(&adapter.get_info())
-            );
-        }
-
-        let capabilities = {
-            crate::profile_scope!("get_capabilities");
-            surface.get_capabilities(&adapter).formats
-        };
-        let target_format = crate::preferred_framebuffer_format(&capabilities)?;
-
-        let (device, queue) = {
-            crate::profile_scope!("request_device");
-            adapter
-                .request_device(&(*config.device_descriptor)(&adapter), None)
-                .await?
-        };
-
         let renderer = Renderer::new(&device, target_format, depth_format, msaa_samples);
 
         Ok(Self {
-            adapter: Arc::new(adapter),
-            #[cfg(not(target_arch = "wasm32"))]
-            available_adapters: available_adapters.into(),
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            adapter,
+            device,
+            queue,
             target_format,
             renderer: Arc::new(RwLock::new(renderer)),
         })
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn describe_adapters(adapters: &[wgpu::Adapter]) -> String {
-    if adapters.is_empty() {
-        "(none)".to_owned()
-    } else if adapters.len() == 1 {
-        adapter_info_summary(&adapters[0].get_info())
-    } else {
-        let mut list_string = String::new();
-        for adapter in adapters {
-            if !list_string.is_empty() {
-                list_string += ", ";
-            }
-            list_string += &format!("{{{}}}", adapter_info_summary(&adapter.get_info()));
-        }
-        list_string
     }
 }
 

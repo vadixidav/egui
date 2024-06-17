@@ -4,12 +4,12 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use egui::{ViewportId, ViewportIdMap, ViewportIdSet};
+use wgpu::{SurfaceError, TextureFormat};
 
-use crate::{renderer, RenderState, SurfaceErrorAction, WgpuConfiguration};
+use crate::{renderer, RenderState};
 
 struct SurfaceState {
     surface: wgpu::Surface<'static>,
-    alpha_mode: wgpu::CompositeAlphaMode,
     width: u32,
     height: u32,
     supports_screenshot: bool,
@@ -80,13 +80,15 @@ impl BufferPadding {
 ///
 /// NOTE: all egui viewports share the same painter.
 pub struct Painter {
-    configuration: WgpuConfiguration,
     msaa_samples: u32,
-    support_transparent_backbuffer: bool,
     depth_format: Option<wgpu::TextureFormat>,
     screen_capture_state: Option<CaptureState>,
 
     instance: Arc<wgpu::Instance>,
+    adapter: Arc<wgpu::Adapter>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    target_format: TextureFormat,
     render_state: Option<RenderState>,
 
     // Per viewport/window:
@@ -110,18 +112,23 @@ impl Painter {
     /// associated.
     pub fn new(
         instance: Arc<wgpu::Instance>,
+        adapter: Arc<wgpu::Adapter>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        target_format: TextureFormat,
         msaa_samples: u32,
         depth_format: Option<wgpu::TextureFormat>,
-        support_transparent_backbuffer: bool,
     ) -> Self {
         Self {
-            configuration,
             msaa_samples,
-            support_transparent_backbuffer,
             depth_format,
             screen_capture_state: None,
 
             instance,
+            adapter,
+            device,
+            queue,
+            target_format,
             render_state: None,
 
             depth_texture_view: Default::default(),
@@ -135,43 +142,6 @@ impl Painter {
     /// Will return [`None`] if the render state has not been initialized yet.
     pub fn render_state(&self) -> Option<RenderState> {
         self.render_state.clone()
-    }
-
-    fn configure_surface(
-        surface_state: &SurfaceState,
-        render_state: &RenderState,
-        config: &WgpuConfiguration,
-    ) {
-        crate::profile_function!();
-
-        let usage = if surface_state.supports_screenshot {
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST
-        } else {
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-        };
-
-        let width = surface_state.width;
-        let height = surface_state.height;
-
-        let mut surf_config = wgpu::SurfaceConfiguration {
-            usage,
-            format: render_state.target_format,
-            present_mode: config.present_mode,
-            alpha_mode: surface_state.alpha_mode,
-            view_formats: vec![render_state.target_format],
-            ..surface_state
-                .surface
-                .get_default_config(&render_state.adapter, width, height)
-                .expect("The surface isn't supported by this adapter")
-        };
-
-        if let Some(desired_maximum_frame_latency) = config.desired_maximum_frame_latency {
-            surf_config.desired_maximum_frame_latency = desired_maximum_frame_latency;
-        }
-
-        surface_state
-            .surface
-            .configure(&render_state.device, &surf_config);
     }
 
     /// Updates (or clears) the [`winit::window::Window`] associated with the [`Painter`]
@@ -254,29 +224,15 @@ impl Painter {
             render_state
         } else {
             let render_state = RenderState::create(
-                &self.configuration,
-                &self.instance,
-                &surface,
+                self.adapter.clone(),
+                self.device.clone(),
+                self.queue.clone(),
+                self.target_format,
                 self.depth_format,
                 self.msaa_samples,
             )
             .await?;
             self.render_state.get_or_insert(render_state)
-        };
-        let alpha_mode = if self.support_transparent_backbuffer {
-            let supported_alpha_modes = surface.get_capabilities(&render_state.adapter).alpha_modes;
-
-            // Prefer pre multiplied over post multiplied!
-            if supported_alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-                wgpu::CompositeAlphaMode::PreMultiplied
-            } else if supported_alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
-                wgpu::CompositeAlphaMode::PostMultiplied
-            } else {
-                log::warn!("Transparent window was requested, but the active wgpu surface does not support a `CompositeAlphaMode` with transparency.");
-                wgpu::CompositeAlphaMode::Auto
-            }
-        } else {
-            wgpu::CompositeAlphaMode::Auto
         };
         let supports_screenshot =
             !matches!(render_state.adapter.get_info().backend, wgpu::Backend::Gl);
@@ -286,7 +242,6 @@ impl Painter {
                 surface,
                 width: size.width,
                 height: size.height,
-                alpha_mode,
                 supports_screenshot,
             },
         );
@@ -329,8 +284,6 @@ impl Painter {
 
         surface_state.width = width;
         surface_state.height = height;
-
-        Self::configure_surface(surface_state, render_state, &self.configuration);
 
         if let Some(depth_format) = self.depth_format {
             self.depth_texture_view.insert(
@@ -514,16 +467,14 @@ impl Painter {
         clipped_primitives: &[epaint::ClippedPrimitive],
         textures_delta: &epaint::textures::TexturesDelta,
         capture: bool,
-    ) -> (f32, Option<epaint::ColorImage>) {
+    ) -> Result<Option<epaint::ColorImage>, SurfaceError> {
         crate::profile_function!();
 
-        let mut vsync_sec = 0.0;
-
         let Some(render_state) = self.render_state.as_mut() else {
-            return (vsync_sec, None);
+            return Ok(None);
         };
         let Some(surface_state) = self.surfaces.get(&viewport_id) else {
-            return (vsync_sec, None);
+            return Ok(None);
         };
 
         let mut encoder =
@@ -570,24 +521,7 @@ impl Painter {
 
         let output_frame = {
             crate::profile_scope!("get_current_texture");
-            // This is what vsync-waiting happens on my Mac.
-            let start = web_time::Instant::now();
-            let output_frame = surface_state.surface.get_current_texture();
-            vsync_sec += start.elapsed().as_secs_f32();
-            output_frame
-        };
-
-        let output_frame = match output_frame {
-            Ok(frame) => frame,
-            Err(err) => match (*self.configuration.on_surface_error)(err) {
-                SurfaceErrorAction::RecreateSurface => {
-                    Self::configure_surface(surface_state, render_state, &self.configuration);
-                    return (vsync_sec, None);
-                }
-                SurfaceErrorAction::SkipFrame => {
-                    return (vsync_sec, None);
-                }
-            },
+            surface_state.surface.get_current_texture()?
         };
 
         {
@@ -667,12 +601,9 @@ impl Painter {
         // Submit the commands: both the main buffer and user-defined ones.
         {
             crate::profile_scope!("Queue::submit");
-            // wgpu doesn't document where vsync can happen. Maybe here?
-            let start = web_time::Instant::now();
             render_state
                 .queue
                 .submit(user_cmd_bufs.into_iter().chain([encoded]));
-            vsync_sec += start.elapsed().as_secs_f32();
         };
 
         let screenshot = if capture {
@@ -687,13 +618,10 @@ impl Painter {
 
         {
             crate::profile_scope!("present");
-            // wgpu doesn't document where vsync can happen. Maybe here?
-            let start = web_time::Instant::now();
             output_frame.present();
-            vsync_sec += start.elapsed().as_secs_f32();
         }
 
-        (vsync_sec, screenshot)
+        Ok(screenshot)
     }
 
     pub fn gc_viewports(&mut self, active_viewports: &ViewportIdSet) {
