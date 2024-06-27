@@ -47,13 +47,13 @@ impl Default for ContextMenus {
     }
 }
 
-impl super::Demo for ContextMenus {
+impl crate::Demo for ContextMenus {
     fn name(&self) -> &'static str {
         "☰ Context Menus"
     }
 
     fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
-        use super::View;
+        use crate::View;
         egui::Window::new(self.name())
             .vscroll(false)
             .resizable(false)
@@ -62,7 +62,7 @@ impl super::Demo for ContextMenus {
     }
 }
 
-impl super::View for ContextMenus {
+impl crate::View for ContextMenus {
     fn ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.menu_button("Click for menu", Self::nested_menus);
@@ -156,6 +156,8 @@ impl ContextMenus {
     }
 
     fn nested_menus(ui: &mut egui::Ui) {
+        ui.set_max_width(200.0); // To make sure we wrap long text
+
         if ui.button("Open…").clicked() {
             ui.close_menu();
         }

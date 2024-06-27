@@ -74,7 +74,7 @@ pub struct RenderState {
 }
 
 impl RenderState {
-    /// Creates a new `RenderState`, containing everything needed for drawing egui with wgpu.
+    /// Creates a new [`RenderState`], containing everything needed for drawing egui with wgpu.
     ///
     /// # Errors
     /// Wgpu initialization may fail due to incompatible hardware or driver for a given config.
